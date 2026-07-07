@@ -1,0 +1,1269 @@
+\documentclass[12pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazil]{babel}
+\usepackage[a4paper, margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{tikz}
+\usepackage{float}
+\usepackage{setspace}
+\usepackage{indentfirst}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.97,0.97,0.97}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{blue},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2
+}
+\lstset{style=mystyle}
+
+\title{\textbf{Paralelização de Algoritmos Clássicos com OpenMP:}\\
+\large Análise de Desempenho, Speedup e Eficiência}
+
+\author{
+    Lucas Pontes Lira\thanks{lucas.lira@aluno.cefet-rj.br} \quad
+    Caio Sena Freitas\thanks{caio.freitas@aluno.cefet-rj.br}\\[0.3em]
+    \small Centro Federal de Educação Tecnológica Celso Suckow da Fonseca (CEFET-RJ)\\
+    \small UNED Nova Friburgo --- Bacharelado em Sistemas de Informação
+}
+
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Processamento paralelo virou uma das formas mais diretas de extrair desempenho de processadores modernos com vários núcleos. Nesse trabalho a gente paralelo quatro algoritmos clássicos --- multiplicação de matrizes, Selection Sort, Heap Sort e histograma --- usando OpenMP em C. Para cada um foram feitas uma versão serial de referência e uma versão paralela, com análise das dependências de dados e das regiões críticas. Os testes rodaram variando o tamanho das entradas e o número de threads (1, 2 e 4), medindo tempo de execução, speedup e eficiência. Multiplicação matricial e histograma escalaram bem; os dois sorts tiveram ganhos bem menores por causa das dependências sequenciais que não dá pra fugir. A comparação entre Selection Sort e Heap Sort mostrou diferenças no comportamento de cache e no balanceamento de carga que explicam boa parte das diferenças no speedup.
+
+\medskip
+\noindent\textbf{Palavras-chave:} OpenMP, computação paralela, multiplicação matricial, algoritmos de ordenação, histograma, speedup, eficiência.
+\end{abstract}
+
+\begin{otherlanguage*}{english}
+\begin{abstract}
+Parallel processing has become one of the most straightforward ways to extract performance from modern multi-core processors. In this work we parallelize four classical algorithms --- matrix multiplication, Selection Sort, Heap Sort, and histogram computation --- using OpenMP in C. For each algorithm we developed a serial reference implementation and a parallel version, analyzing data dependencies and critical regions. Experiments ran with varying input sizes and thread counts (1, 2, and 4), measuring execution time, speedup, and efficiency. Matrix multiplication and histogram scaled well; the sorting algorithms showed smaller gains due to inherent sequential dependencies. The comparison between Selection Sort and Heap Sort revealed differences in cache behavior and load balancing that explain much of the speedup gap.
+
+\medskip
+\noindent\textbf{Keywords:} OpenMP, parallel computing, matrix multiplication, sorting algorithms, histogram, speedup, efficiency.
+\end{abstract}
+\end{otherlanguage*}
+
+\newpage
+\tableofcontents
+\newpage
+
+% =====================================================================
+\section{Introdução}
+
+Quando começamos a estudar computação paralela a pergunta mais óbvia é: ``se o processador tem 6 núcleos, por que o programa não roda 6 vezes mais rápido?''. A resposta não é simples, e explorar ela na prática foi um dos principais motivadores desse trabalho.
+
+Processadores com múltiplos núcleos são o padrão hoje em dia, tanto em máquinas pessoais quanto em servidores. O problema é que um programa escrito de forma convencional usa só um núcleo. Para aproveitar os outros é preciso dividir o trabalho explicitamente, o que exige cuidado porque nem todo algoritmo divide bem.
+
+O OpenMP é uma das ferramentas mais usadas pra isso em sistemas de memória compartilhada. Ele funciona basicamente adicionando diretivas de compilador (\texttt{\#pragma omp ...}) no código C existente, sem precisar reescrever tudo do zero. Pra fins acadêmicos funciona bem porque o código ainda é legível.
+
+Escolhemos quatro algoritmos justamente porque eles têm características bem diferentes quanto à paralelizabilidade. A multiplicação de matrizes é quase um caso ideal: os cálculos de cada elemento da matriz resultado são independentes entre si. O histograma tem um problema clássico de condição de corrida que precisa ser resolvido com cuidado. Os sorts (Selection e Heap) têm dependências de dados que limitam o quanto dá pra paralelizar, e comparar os dois revela coisas interessantes sobre cache e balanceamento de carga.
+
+O artigo está organizado assim: a Seção 2 traz a base teórica de paralelismo e OpenMP. A Seção 3 comenta trabalhos relacionados. A Seção 4 descreve o ambiente de teste e a metodologia. A Seção 5 apresenta o desenvolvimento de cada algoritmo. A Seção 6 discute os resultados. A Seção 7 lista as limitações. A Seção 8 fecha com as considerações finais.
+
+% =====================================================================
+\section{Fundamentação Teórica}
+
+\subsection{Modelos de Computação Paralela}
+
+A taxonomia de Flynn \cite{flynn1972} classifica os computadores em quatro categorias: SISD, SIMD, MISD e MIMD. Processadores multicore modernos se encaixam na categoria MIMD, onde vários fluxos de instrução operam sobre vários fluxos de dados ao mesmo tempo.
+
+Dentro do MIMD tem dois modelos principais: memória distribuída, onde cada processador tem sua própria memória e a comunicação é por troca de mensagens (como no MPI); e memória compartilhada, onde todos os processadores acessam o mesmo espaço de endereçamento. O OpenMP funciona nesse segundo modelo.
+
+\subsection{OpenMP: Modelo de Execução}
+
+O OpenMP foi padronizado em 1997 e está na versão 5.2 desde 2021 \cite{openmp52}. Ele define um conjunto de diretivas para C, C++ e Fortran.
+
+O modelo de execução segue o paradigma fork-join: começa com uma thread mestre; quando encontra um \texttt{\#pragma omp parallel}, essa thread cria um time de threads auxiliares; ao final da região paralela todas sincronizam e só a mestre continua.
+
+As diretivas mais usadas nesse trabalho:
+
+\begin{itemize}
+    \item \texttt{\#pragma omp parallel for} --- distribui as iterações de um laço entre as threads.
+    \item \texttt{\#pragma omp parallel for reduction} --- mesmo que o anterior mas combinando resultados parciais com segurança.
+    \item \texttt{\#pragma omp critical} --- garante que só uma thread execute aquele bloco por vez.
+    \item \texttt{\#pragma omp atomic} --- protege uma operação read-modify-write de forma mais eficiente que critical.
+    \item Cláusulas \texttt{schedule(static/dynamic/guided)} --- controlam como as iterações são distribuídas entre threads.
+    \item Cláusulas \texttt{private}, \texttt{shared}, \texttt{firstprivate} --- definem o escopo das variáveis.
+\end{itemize}
+
+\subsection{Métricas de Desempenho}
+
+As três métricas principais são:
+
+\textbf{Tempo de execução ($T$):} medido com \texttt{omp\_get\_wtime()}, que retorna o wall-clock time em segundos.
+
+\textbf{Speedup ($S$):} razão entre o tempo serial e o paralelo com $p$ threads:
+\begin{equation}
+S(p) = \frac{T_s}{T_p}
+\end{equation}
+O speedup ideal seria $S(p) = p$, o que raramente acontece na prática.
+
+\textbf{Eficiência ($E$):} fração do speedup teórico que realmente se aproveitou:
+\begin{equation}
+E(p) = \frac{S(p)}{p} = \frac{T_s}{p \cdot T_p}
+\end{equation}
+
+\subsection{Lei de Amdahl}
+
+A Lei de Amdahl \cite{amdahl1967} define o limite teórico do speedup dado que uma fração $f$ do programa é serial:
+\begin{equation}
+S_{max}(p) = \frac{1}{f + \frac{1-f}{p}}
+\end{equation}
+
+Quando $p \to \infty$, o speedup máximo converge pra $1/f$. Isso significa que mesmo 10\% de código serial já limita o speedup máximo a 10$\times$, não importa quantos processadores você tenha. Essa lei se mostrou bastante precisa nos nossos resultados.
+
+\subsection{Lei de Gustafson}
+
+A Lei de Gustafson \cite{gustafson1988} propõe uma perspectiva diferente: se o tamanho do problema cresce junto com o número de processadores, o speedup escalado é:
+\begin{equation}
+S_G(p) = p - f(p - 1)
+\end{equation}
+
+A ideia é que problemas maiores tendem a ter frações seriais menores em proporção. Isso ficou bem visível nos nossos experimentos, principalmente na multiplicação matricial.
+
+\subsection{Condição de Corrida e Regiões Críticas}
+
+Uma condição de corrida acontece quando duas ou mais threads acessam uma variável compartilhada e pelo menos uma delas escreve. O resultado fica não-determinístico. A solução é sincronização: regiões críticas, atômicas ou reduções.
+
+O custo de uma região crítica é proporcional a quantas vezes as threads tentam entrar nela. Se mal usada, pode jogar fora todo o ganho do paralelismo.
+
+\subsection{Dependência de Dados}
+
+Quando o resultado da iteração $i$ de um laço é lido pela iteração $i+k$ (dependência RAW --- Read After Write), as iterações não podem rodar em paralelo sem cuidado especial. Identificar essas dependências é o passo mais importante antes de paralelizar qualquer coisa.
+
+\subsection{Cache e False Sharing}
+
+Algoritmos que acessam endereços consecutivos de memória (localidade espacial) rodam mais rápido por aproveitar melhor o cache. Em sistemas multicore existe ainda o problema de \textit{false sharing}: duas threads escrevendo em variáveis diferentes mas na mesma linha de cache invalidam o cache uma da outra, degradando o desempenho mesmo sem conflito real.
+
+% =====================================================================
+\section{Trabalhos Relacionados}
+
+Dagum e Menon \cite{dagum1998} foram dos primeiros a documentar o OpenMP de forma ampla, destacando o modelo incremental de paralelização de laços. Chapman, Jost e van der Pas \cite{chapman2007} consolidaram as boas práticas em um livro que ainda é uma das referências mais citadas da área.
+
+Na parte de multiplicação de matrizes, Goto e van de Geijn \cite{goto2008} mostraram como organizar os acessos à memória tem impacto enorme no desempenho. Anderson et al. \cite{anderson1999} investigaram a distribuição de trabalho em operações de álgebra linear densa e chegaram a conclusão de que paralelizar o laço externo é a estratégia mais eficiente, o que condiz com o que a gente implementou.
+
+Paralelizar sorts não é trivial. Singler, Sanders e Putze \cite{singler2007} analisaram a paralelização de algoritmos de ordenação da STL, mostrando que Merge Sort e Quick Sort têm estrutura recursiva que favorece o paralelismo com tasks. O Selection Sort é frequentemente citado como problemático por causa da dependência no laço externo. O Heap Sort fica no meio: a construção do heap dá pra paralelizar, mas a extração não.
+
+Nakashima et al. \cite{nakashima2012} compararam OpenMP e MPI e concluíram que para problemas de memória compartilhada o OpenMP é mais fácil de programar. Para sistemas distribuídos ou quando a memória de um nó não é suficiente, MPI é necessário.
+
+% =====================================================================
+\section{Metodologia}
+
+\subsection{Ambiente de Execução}
+
+Os experimentos rodaram em um computador pessoal com Windows 10, processador AMD Ryzen 5 3500X (6 núcleos físicos, 6 threads lógicas). O compilador foi o GCC via MinGW-w64, com as flags \texttt{-fopenmp} e \texttt{-O2}. A flag \texttt{-O2} foi escolhida pra ter otimizações razoáveis sem esconder o comportamento paralelo.
+
+\subsection{Organização dos Experimentos}
+
+Para cada algoritmo foram usados três tamanhos de entrada, aproximadamente dobrando a cada incremento:
+
+\begin{table}[H]
+\centering
+\caption{Tamanhos de entrada utilizados}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Algoritmo} & \textbf{Tam. 1} & \textbf{Tam. 2} & \textbf{Tam. 3} \\
+\midrule
+Multiplicação Matricial & $350\times350$ & $700\times700$ & $1400\times1400$ \\
+Selection Sort & 33.000 & 66.000 & 106.000 \\
+Heap Sort & 20.000.000 & 40.000.000 & 80.000.000 \\
+Histograma & 150.000.000 & 300.000.000 & 600.000.000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Para cada combinação de tamanho e número de threads (1, 2 e 4), o experimento rodou cinco vezes e o valor reportado é a mediana. Isso ajuda a reduzir o efeito de picos de uso do sistema operacional.
+
+\subsection{Medição de Tempo}
+
+O tempo foi medido só durante a fase de processamento, excluindo leitura e escrita de arquivos. Usamos \texttt{omp\_get\_wtime()}, que dá o wall-clock time com precisão de ponto flutuante dupla. Isso é melhor que \texttt{clock()} do C padrão porque conta o tempo real, não só o tempo de CPU da thread principal.
+
+\subsection{Estrutura dos Arquivos}
+
+Dois arquivos por algoritmo: sufixo \texttt{\_serial} para a versão sequencial e \texttt{\_paralelo} para a versão com OpenMP. Um Makefile único compila tudo.
+
+\subsection{Verificação de Correção}
+
+Antes de medir desempenho a gente verificou que as versões paralelas produzem os mesmos resultados que as seriais. Para os sorts foi comparação elemento a elemento; para o histograma foi comparação das frequências. Só depois de confirmar isso é que passamos para os experimentos.
+
+% =====================================================================
+\section{Desenvolvimento}
+
+\subsection{Multiplicação Matricial}
+
+\subsubsection{Descrição}
+
+Dadas duas matrizes $A$ ($m \times k$) e $B$ ($k \times n$), o produto $C = A \times B$ tem dimensão $m \times n$ com elementos:
+\begin{equation}
+C[i][j] = \sum_{l=0}^{k-1} A[i][l] \cdot B[l][j]
+\end{equation}
+
+Para matrizes quadradas de ordem $n$, isso dá $O(n^3)$ operações.
+
+\subsubsection{Complexidade}
+
+$O(n^3)$ no tempo, $O(1)$ de espaço auxiliar (excluindo as matrizes). Algoritmos como Strassen chegam a $O(n^{2.807})$ \cite{strassen1969}, mas o padrão cúbico foi usado aqui por ser o mais comum na prática.
+
+\subsubsection{Implementação Serial}
+
+\begin{lstlisting}[language=C, caption={Multiplicação matricial serial}]
+#include <stdio.h>
+#include <stdlib.h>
+#include <omp.h>
+#include <libppc.h>
+
+int main(int argc, char *argv[]) {
+    if (argc < 4) {
+        fprintf(stderr, "Uso: %s <ordem> <arq1> <arq2>\n", argv[0]);
+        return 1;
+    }
+    int n = atoi(argv[1]);
+
+    double *A = load_double_matrix(argv[2], n, n);
+    double *B = load_double_matrix(argv[3], n, n);
+    double *C = (double *)calloc(n * n, sizeof(double));
+
+    double t_inicio = omp_get_wtime();
+
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            double soma = 0.0;
+            for (int k = 0; k < n; k++)
+                soma += M(i, k, n, A) * M(k, j, n, B);
+            M(i, j, n, C) = soma;
+        }
+    }
+
+    double t_fim = omp_get_wtime();
+    printf("Tempo serial: %.6f s\n", t_fim - t_inicio);
+
+    save_double_matrix(C, n, n, "matriz_mult.out");
+    free(A); free(B); free(C);
+    return 0;
+}
+\end{lstlisting}
+
+\subsubsection{Dependências de Dados}
+
+O laço externo ($i$) não tem dependência entre iterações: calcular $C[i][j]$ é completamente independente de $C[i'][j']$ para $(i,j) \neq (i',j')$. A variável \texttt{soma} é local a cada par $(i,j)$. Isso torna o laço externo um candidato natural à paralelização, sem precisar de região crítica.
+
+\subsubsection{Implementação Paralela}
+
+\begin{lstlisting}[language=C, caption={Multiplicação matricial paralela}]
+#include <stdio.h>
+#include <stdlib.h>
+#include <omp.h>
+#include <libppc.h>
+
+int main(int argc, char *argv[]) {
+    if (argc < 4) {
+        fprintf(stderr, "Uso: %s <ordem> <arq1> <arq2>\n", argv[0]);
+        return 1;
+    }
+    int n = atoi(argv[1]);
+
+    double *A = load_double_matrix(argv[2], n, n);
+    double *B = load_double_matrix(argv[3], n, n);
+    double *C = (double *)calloc(n * n, sizeof(double));
+
+    double t_inicio = omp_get_wtime();
+
+    /* cada thread pega um subconjunto de linhas de C */
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            double soma = 0.0;
+            for (int k = 0; k < n; k++)
+                soma += M(i, k, n, A) * M(k, j, n, B);
+            M(i, j, n, C) = soma;
+        }
+    }
+
+    double t_fim = omp_get_wtime();
+    printf("Tempo paralelo (%d threads): %.6f s\n",
+           omp_get_max_threads(), t_fim - t_inicio);
+
+    save_double_matrix(C, n, n, "matriz_mult.out");
+    free(A); free(B); free(C);
+    return 0;
+}
+\end{lstlisting}
+
+O \texttt{schedule(static)} divide as $n$ linhas igualmente entre as threads. Como cada linha dá o mesmo trabalho ($n^2$ operações), o balanceamento é perfeito e não faz sentido usar escalonamento dinâmico aqui.
+
+\subsubsection{Resultados}
+
+\begin{table}[H]
+\centering
+\caption{Tempo de execução (s) --- Multiplicação Matricial}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Tamanho} & \textbf{1 thread} & \textbf{2 threads} & \textbf{4 threads} \\
+\midrule
+$350\times350$ & 0,423 & 0,215 & 0,108 \\
+$700\times700$ & 3,388 & 1,711 & 0,864 \\
+$1400\times1400$ & 27,102 & 13,619 & 6,914 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Speedup --- Multiplicação Matricial}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Tamanho} & \textbf{2 threads} & \textbf{4 threads} \\
+\midrule
+$350\times350$ & 1,97 & 3,91 \\
+$700\times700$ & 1,98 & 3,92 \\
+$1400\times1400$ & 1,99 & 3,92 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Eficiência --- Multiplicação Matricial}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Tamanho} & \textbf{2 threads} & \textbf{4 threads} \\
+\midrule
+$350\times350$ & 0,985 & 0,978 \\
+$700\times700$ & 0,990 & 0,980 \\
+$1400\times1400$ & 0,995 & 0,980 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A multiplicação matricial foi o algoritmo que melhor respondeu à paralelização, com eficiência acima de 97\% em todos os casos. O crescimento leve da eficiência com entradas maiores bate com o que a Lei de Gustafson prevê: para matrizes grandes, o overhead de gerenciar threads fica insignificante perto do trabalho útil.
+
+% ------------------------------------------------------------------
+\subsection{Selection Sort}
+
+\subsubsection{Descrição}
+
+O Selection Sort divide o vetor em duas partes: ordenada (à esquerda, começa vazia) e não-ordenada (à direita, começa com tudo). Em cada passo seleciona o menor elemento da parte não-ordenada e troca com a primeira posição não-ordenada.
+
+Exemplo com \texttt{[64, 25, 12, 22, 11]}:
+\begin{itemize}
+    \item Passo 1: mínimo = 11. Troca 64 $\leftrightarrow$ 11: \texttt{[11, 25, 12, 22, 64]}
+    \item Passo 2: mínimo = 12. Troca 25 $\leftrightarrow$ 12: \texttt{[11, 12, 25, 22, 64]}
+    \item Passo 3: mínimo = 22. Troca 25 $\leftrightarrow$ 22: \texttt{[11, 12, 22, 25, 64]}
+    \item Passo 4: mínimo = 25. Sem troca: \texttt{[11, 12, 22, 25, 64]}
+\end{itemize}
+
+\subsubsection{Complexidade}
+
+$\Theta(n^2)$ no tempo (melhor, médio e pior caso são iguais). $O(1)$ de espaço auxiliar.
+
+\subsubsection{Implementação Serial}
+
+\begin{lstlisting}[language=C, caption={Selection Sort serial}]
+#include <stdio.h>
+#include <stdlib.h>
+#include <omp.h>
+
+int main(int argc, char *argv[]) {
+    if (argc < 3) {
+        fprintf(stderr, "Uso: %s <tamanho> <arquivo>\n", argv[0]);
+        return 1;
+    }
+    int n = atoi(argv[1]);
+    float *v = (float *)malloc(n * sizeof(float));
+
+    FILE *f = fopen(argv[2], "rb");
+    fread(v, sizeof(float), n, f);
+    fclose(f);
+
+    double t_inicio = omp_get_wtime();
+
+    for (int i = 0; i < n - 1; i++) {
+        int min_idx = i;
+        for (int j = i + 1; j < n; j++) {
+            if (v[j] < v[min_idx])
+                min_idx = j;
+        }
+        if (min_idx != i) {
+            float tmp = v[i];
+            v[i] = v[min_idx];
+            v[min_idx] = tmp;
+        }
+    }
+
+    double t_fim = omp_get_wtime();
+    printf("Tempo serial: %.6f s\n", t_fim - t_inicio);
+
+    FILE *out = fopen("vetor_ordenado.out", "wb");
+    fwrite(v, sizeof(float), n, out);
+    fclose(out);
+    free(v);
+    return 0;
+}
+\end{lstlisting}
+
+\subsubsection{Dependências de Dados}
+
+O laço externo ($i$) tem uma dependência forte: na iteração $i$ o vetor é modificado pela troca, e a iteração $i+1$ lê o vetor modificado. Não dá pra paralelizar diretamente.
+
+O laço interno ($j$) é independente entre iterações, mas a atualização de \texttt{min\_idx} cria uma condição de corrida se duas threads tentarem atualizar ao mesmo tempo. A solução é cada thread manter seu próprio mínimo local e depois combinar com uma região crítica.
+
+\subsubsection{Implementação Paralela}
+
+\begin{lstlisting}[language=C, caption={Selection Sort paralelo}]
+#include <stdio.h>
+#include <stdlib.h>
+#include <omp.h>
+
+int main(int argc, char *argv[]) {
+    if (argc < 3) {
+        fprintf(stderr, "Uso: %s <tamanho> <arquivo>\n", argv[0]);
+        return 1;
+    }
+    int n = atoi(argv[1]);
+    float *v = (float *)malloc(n * sizeof(float));
+
+    FILE *f = fopen(argv[2], "rb");
+    fread(v, sizeof(float), n, f);
+    fclose(f);
+
+    double t_inicio = omp_get_wtime();
+
+    for (int i = 0; i < n - 1; i++) {
+        int min_idx = i;
+        float min_val = v[i];
+
+        #pragma omp parallel
+        {
+            int local_min_idx = i;
+            float local_min_val = v[i];
+
+            #pragma omp for nowait
+            for (int j = i + 1; j < n; j++) {
+                if (v[j] < local_min_val) {
+                    local_min_val = v[j];
+                    local_min_idx = j;
+                }
+            }
+
+            /* cada thread atualiza o minimo global uma de cada vez */
+            #pragma omp critical
+            {
+                if (local_min_val < min_val) {
+                    min_val = local_min_val;
+                    min_idx = local_min_idx;
+                }
+            }
+        }
+
+        if (min_idx != i) {
+            float tmp = v[i];
+            v[i] = v[min_idx];
+            v[min_idx] = tmp;
+        }
+    }
+
+    double t_fim = omp_get_wtime();
+    printf("Tempo paralelo (%d threads): %.6f s\n",
+           omp_get_max_threads(), t_fim - t_inicio);
+
+    FILE *out = fopen("vetor_ordenado.out", "wb");
+    fwrite(v, sizeof(float), n, out);
+    fclose(out);
+    free(v);
+    return 0;
+}
+\end{lstlisting}
+
+O \texttt{nowait} permite que as threads avancem direto pra região crítica sem esperar que todas terminem o laço. A região crítica em si é rápida (só uma comparação e atribuição).
+
+\subsubsection{Resultados}
+
+\begin{table}[H]
+\centering
+\caption{Tempo de execução (s) --- Selection Sort}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Tamanho} & \textbf{1 thread} & \textbf{2 threads} & \textbf{4 threads} \\
+\midrule
+33.000 & 2,413 & 1,508 & 1,063 \\
+66.000 & 9,650 & 5,744 & 4,124 \\
+106.000 & 24,892 & 14,472 & 10,372 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Speedup --- Selection Sort}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Tamanho} & \textbf{2 threads} & \textbf{4 threads} \\
+\midrule
+33.000 & 1,60 & 2,27 \\
+66.000 & 1,68 & 2,34 \\
+106.000 & 1,72 & 2,40 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Eficiência --- Selection Sort}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Tamanho} & \textbf{2 threads} & \textbf{4 threads} \\
+\midrule
+33.000 & 0,801 & 0,569 \\
+66.000 & 0,840 & 0,584 \\
+106.000 & 0,860 & 0,600 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+O speedup de 2,40× com 4 threads ficou bem longe do ideal. O principal culpado é o laço externo que permanece serial: para cada uma das $n-1$ iterações a gente cria e destrói um time de threads, e esse overhead se acumula bastante. Nos testes iniciais o resultado com entradas pequenas chegou a ficar pior que o serial por causa disso.
+
+% ------------------------------------------------------------------
+\subsection{Heap Sort}
+
+\subsubsection{Descrição}
+
+O Heap Sort usa a estrutura de max-heap, onde cada nó é maior ou igual aos seus filhos. O nó na posição $i$ tem filhos em $2i+1$ e $2i+2$.
+
+O algoritmo tem duas fases:
+\begin{itemize}
+    \item \textbf{Fase 1 --- Construção do heap (heapify):} reestrutura o vetor para satisfazer a propriedade de max-heap, de baixo pra cima. $O(n)$ no total.
+    \item \textbf{Fase 2 --- Extração:} troca o maior elemento (raiz) com o último, reduz o heap em 1 e restaura a propriedade com sift-down. Repete $n-1$ vezes, cada vez com custo $O(\log n)$. Total $O(n \log n)$.
+\end{itemize}
+
+\subsubsection{Complexidade}
+
+$O(n \log n)$ no melhor, médio e pior caso. $O(1)$ de espaço auxiliar.
+
+\subsubsection{Implementação Serial}
+
+\begin{lstlisting}[language=C, caption={Heap Sort serial}]
+#include <stdio.h>
+#include <stdlib.h>
+#include <omp.h>
+
+void sift_down(float *v, int i, int sz) {
+    while (1) {
+        int maior = i;
+        int esq = 2 * i + 1;
+        int dir = 2 * i + 2;
+        if (esq < sz && v[esq] > v[maior]) maior = esq;
+        if (dir < sz && v[dir] > v[maior]) maior = dir;
+        if (maior == i) break;
+        float tmp = v[i]; v[i] = v[maior]; v[maior] = tmp;
+        i = maior;
+    }
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 3) {
+        fprintf(stderr, "Uso: %s <tamanho> <arquivo>\n", argv[0]);
+        return 1;
+    }
+    int n = atoi(argv[1]);
+    float *v = (float *)malloc(n * sizeof(float));
+
+    FILE *f = fopen(argv[2], "rb");
+    fread(v, sizeof(float), n, f);
+    fclose(f);
+
+    double t_inicio = omp_get_wtime();
+
+    /* fase 1: constroi o heap de baixo pra cima */
+    for (int i = n / 2 - 1; i >= 0; i--)
+        sift_down(v, i, n);
+
+    /* fase 2: extrai o maximo repetidamente -- serial por dependencia */
+    for (int i = n - 1; i > 0; i--) {
+        float tmp = v[0]; v[0] = v[i]; v[i] = tmp;
+        sift_down(v, 0, i);
+    }
+
+    double t_fim = omp_get_wtime();
+    printf("Tempo serial: %.6f s\n", t_fim - t_inicio);
+
+    FILE *out = fopen("vetor_ordenado.out", "wb");
+    fwrite(v, sizeof(float), n, out);
+    fclose(out);
+    free(v);
+    return 0;
+}
+\end{lstlisting}
+
+\subsubsection{Dependências de Dados}
+
+A fase de construção tem uma dependência entre níveis da árvore: o sift-down de um nó pai depende do estado dos filhos. Mas nós do mesmo nível são independentes entre si, então dá pra paralelizar dentro de cada nível.
+
+A fase de extração é serial sem saída. Cada iteração depende do que a anterior fez no heap. Não tem jeito de fazer duas extrações ao mesmo tempo.
+
+\subsubsection{Implementação Paralela}
+
+\begin{lstlisting}[language=C, caption={Heap Sort paralelo}]
+#include <stdio.h>
+#include <stdlib.h>
+#include <omp.h>
+
+void sift_down(float *v, int i, int sz) {
+    while (1) {
+        int maior = i;
+        int esq = 2 * i + 1;
+        int dir = 2 * i + 2;
+        if (esq < sz && v[esq] > v[maior]) maior = esq;
+        if (dir < sz && v[dir] > v[maior]) maior = dir;
+        if (maior == i) break;
+        float tmp = v[i]; v[i] = v[maior]; v[maior] = tmp;
+        i = maior;
+    }
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 3) {
+        fprintf(stderr, "Uso: %s <tamanho> <arquivo>\n", argv[0]);
+        return 1;
+    }
+    int n = atoi(argv[1]);
+    float *v = (float *)malloc(n * sizeof(float));
+
+    FILE *f = fopen(argv[2], "rb");
+    fread(v, sizeof(float), n, f);
+    fclose(f);
+
+    double t_inicio = omp_get_wtime();
+
+    /* fase 1 paralela: processa nivel a nivel com barreira entre eles */
+    int nivel_inicio = n / 2 - 1;
+    int nivel_atual = nivel_inicio;
+    int nivel_fim;
+
+    while (nivel_atual >= 0) {
+        nivel_fim = nivel_atual;
+        if (nivel_atual > 0)
+            nivel_atual = nivel_atual / 2 - 1
+                          + (nivel_atual % 2 == 0 ? -1 : 0);
+
+        /* nos do mesmo nivel sao independentes */
+        #pragma omp parallel for schedule(static)
+        for (int i = nivel_fim; i >= nivel_atual + 1; i--)
+            sift_down(v, i, n);
+
+        if (nivel_atual < 0) break;
+        nivel_atual--;
+    }
+
+    sift_down(v, 0, n);
+
+    /* fase 2: serial -- nao tem como paralelizar */
+    for (int i = n - 1; i > 0; i--) {
+        float tmp = v[0]; v[0] = v[i]; v[i] = tmp;
+        sift_down(v, 0, i);
+    }
+
+    double t_fim = omp_get_wtime();
+    printf("Tempo paralelo (%d threads): %.6f s\n",
+           omp_get_max_threads(), t_fim - t_inicio);
+
+    FILE *out = fopen("vetor_ordenado.out", "wb");
+    fwrite(v, sizeof(float), n, out);
+    fclose(out);
+    free(v);
+    return 0;
+}
+\end{lstlisting}
+
+\subsubsection{Resultados}
+
+\begin{table}[H]
+\centering
+\caption{Tempo de execução (s) --- Heap Sort}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Tamanho} & \textbf{1 thread} & \textbf{2 threads} & \textbf{4 threads} \\
+\midrule
+20.000.000 & 6,133 & 4,946 & 4,381 \\
+40.000.000 & 12,771 & 9,824 & 8,240 \\
+80.000.000 & 26,554 & 19,525 & 15,439 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Speedup --- Heap Sort}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Tamanho} & \textbf{2 threads} & \textbf{4 threads} \\
+\midrule
+20.000.000 & 1,24 & 1,40 \\
+40.000.000 & 1,30 & 1,55 \\
+80.000.000 & 1,36 & 1,72 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Eficiência --- Heap Sort}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Tamanho} & \textbf{2 threads} & \textbf{4 threads} \\
+\midrule
+20.000.000 & 0,620 & 0,350 \\
+40.000.000 & 0,648 & 0,387 \\
+80.000.000 & 0,679 & 0,429 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Com 4 threads a eficiência não passou de 0,43. A fase de extração, que domina o tempo total por ser $O(n \log n)$ contra $O(n)$ da construção, ficou 100\% serial. É um caso claro do que a Lei de Amdahl prevê: uma fração grande serial limita muito o speedup.
+
+% ------------------------------------------------------------------
+\subsection{Histograma}
+
+\subsubsection{Descrição}
+
+O histograma conta quantas vezes cada valor aparece num vetor. Formalmente:
+\begin{equation}
+H[v] = |\{i : V[i] = v\}|, \quad \forall v \in \{\min(V), \ldots, \max(V)\}
+\end{equation}
+
+O algoritmo percorre o vetor uma vez e incrementa o contador de cada valor encontrado. Simples, mas com um problema sério na versão paralela.
+
+\subsubsection{Complexidade}
+
+$O(n)$ no tempo, $O(r)$ de espaço, onde $r = \max(V) - \min(V) + 1$.
+
+\subsubsection{Implementação Serial}
+
+\begin{lstlisting}[language=C, caption={Histograma serial}]
+#include <stdio.h>
+#include <stdlib.h>
+#include <limits.h>
+#include <omp.h>
+
+int main(void) {
+    FILE *f = fopen("vetor.in", "rb");
+    if (!f) { perror("fopen"); return 1; }
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    rewind(f);
+    int n = (int)(sz / sizeof(int));
+
+    int *v = (int *)malloc(n * sizeof(int));
+    fread(v, sizeof(int), n, f);
+    fclose(f);
+
+    int vmin = INT_MAX, vmax = INT_MIN;
+    for (int i = 0; i < n; i++) {
+        if (v[i] < vmin) vmin = v[i];
+        if (v[i] > vmax) vmax = v[i];
+    }
+
+    int range = vmax - vmin + 1;
+    int *hist = (int *)calloc(range, sizeof(int));
+
+    double t_inicio = omp_get_wtime();
+
+    for (int i = 0; i < n; i++)
+        hist[v[i] - vmin]++;
+
+    double t_fim = omp_get_wtime();
+    printf("Tempo serial: %.6f s\n", t_fim - t_inicio);
+
+    FILE *out = fopen("histograma.out", "w");
+    for (int i = 0; i < range; i++)
+        if (hist[i] > 0)
+            fprintf(out, "%d %d\n", i + vmin, hist[i]);
+    fclose(out);
+
+    free(v); free(hist);
+    return 0;
+}
+\end{lstlisting}
+
+\subsubsection{Condição de Corrida}
+
+O \texttt{hist[v[i] - vmin]++} é uma operação de leitura-modificação-escrita. Se duas threads tentarem incrementar a mesma posição ao mesmo tempo, as duas leem o mesmo valor, as duas somam 1, e as duas escrevem o mesmo resultado --- perdendo um incremento.
+
+Três opções pra resolver isso no OpenMP:
+\begin{enumerate}
+    \item Região crítica global: serializa tudo, joga fora o ganho do paralelismo.
+    \item Operação atômica: usa instrução atômica do hardware, melhor que crítica mas ainda gera contenção com muitos conflitos.
+    \item Histogramas privados por thread: cada thread tem o próprio histograma e no final somam tudo. Sem conflito na fase de contagem.
+\end{enumerate}
+
+Usamos a terceira opção.
+
+\subsubsection{Implementação Paralela}
+
+\begin{lstlisting}[language=C, caption={Histograma paralelo com histogramas privados}]
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <limits.h>
+#include <omp.h>
+
+int main(void) {
+    FILE *f = fopen("vetor.in", "rb");
+    if (!f) { perror("fopen"); return 1; }
+
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    rewind(f);
+    int n = (int)(sz / sizeof(int));
+
+    int *v = (int *)malloc(n * sizeof(int));
+    fread(v, sizeof(int), n, f);
+    fclose(f);
+
+    int vmin = INT_MAX, vmax = INT_MIN;
+    #pragma omp parallel for reduction(min:vmin) reduction(max:vmax)
+    for (int i = 0; i < n; i++) {
+        if (v[i] < vmin) vmin = v[i];
+        if (v[i] > vmax) vmax = v[i];
+    }
+
+    int range = vmax - vmin + 1;
+    int *hist = (int *)calloc(range, sizeof(int));
+    int p = omp_get_max_threads();
+
+    /* uma copia do histograma por thread */
+    int **hist_priv = (int **)malloc(p * sizeof(int *));
+    for (int t = 0; t < p; t++)
+        hist_priv[t] = (int *)calloc(range, sizeof(int));
+
+    double t_inicio = omp_get_wtime();
+
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        int *h_local = hist_priv[tid];
+
+        #pragma omp for schedule(static)
+        for (int i = 0; i < n; i++)
+            h_local[v[i] - vmin]++;  /* sem conflito */
+
+        /* reducao: soma os histogramas privados */
+        #pragma omp for schedule(static)
+        for (int j = 0; j < range; j++) {
+            int soma = 0;
+            for (int t = 0; t < p; t++)
+                soma += hist_priv[t][j];
+            hist[j] = soma;
+        }
+    }
+
+    double t_fim = omp_get_wtime();
+    printf("Tempo paralelo (%d threads): %.6f s\n", p, t_fim - t_inicio);
+
+    FILE *out = fopen("histograma.out", "w");
+    for (int j = 0; j < range; j++)
+        if (hist[j] > 0)
+            fprintf(out, "%d %d\n", j + vmin, hist[j]);
+    fclose(out);
+
+    for (int t = 0; t < p; t++) free(hist_priv[t]);
+    free(hist_priv); free(v); free(hist);
+    return 0;
+}
+\end{lstlisting}
+
+A barreira implícita no final do primeiro \texttt{for} garante que todos os histogramas privados estão prontos antes de começar a redução. O segundo \texttt{for} também paralleliza a própria redução.
+
+\subsubsection{Resultados}
+
+\begin{table}[H]
+\centering
+\caption{Tempo de execução (s) --- Histograma}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Tamanho} & \textbf{1 thread} & \textbf{2 threads} & \textbf{4 threads} \\
+\midrule
+150.000.000 & 6,6000 & 3,4555 & 1,9527 \\
+300.000.000 & 13,2000 & 6,7347 & 3,5967 \\
+600.000.000 & 26,4000 & 13,4010 & 7,2329 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Speedup --- Histograma}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Tamanho} & \textbf{2 threads} & \textbf{4 threads} \\
+\midrule
+150.000.000 & 1,91 & 3,38 \\
+300.000.000 & 1,96 & 3,67 \\
+600.000.000 & 1,97 & 3,65 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Eficiência --- Histograma}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Tamanho} & \textbf{2 threads} & \textbf{4 threads} \\
+\midrule
+150.000.000 & 0,955 & 0,845 \\
+300.000.000 & 0,980 & 0,917 \\
+600.000.000 & 0,985 & 0,912 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+O histograma escalou muito bem. A pequena queda de eficiência com 4 threads vem da fase de redução, que acessa a memória de todas as cópias privadas e gera mais pressão no cache. Mesmo assim ficou acima de 91\% para as entradas maiores.
+
+% ------------------------------------------------------------------
+\subsection{Makefile}
+
+\begin{lstlisting}[language=make, caption={Makefile}]
+CC = gcc
+CFLAGS = -O2 -fopenmp -Wall
+LIBPPC_INC = -I./LibPPC/include
+LIBPPC_SRC = ./LibPPC/src/libpcc.c
+BINS = matrixmult_serial matrixmult_paralelo \
+       selection_serial selection_paralelo \
+       heapsort_serial heapsort_paralelo \
+       histograma_serial histograma_paralelo
+
+all: $(BINS)
+
+matrixmult_serial: matrixmult_serial.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+matrixmult_paralelo: matrixmult_paralelo.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+selection_serial: selection_serial.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+selection_paralelo: selection_paralelo.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+heapsort_serial: heapsort_serial.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+heapsort_paralelo: heapsort_paralelo.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+histograma_serial: histograma_serial.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+histograma_paralelo: histograma_paralelo.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+clean:
+	rm -f $(BINS) *.out *.in
+
+.PHONY: all clean
+\end{lstlisting}
+
+% =====================================================================
+\section{Resultados e Discussão}
+
+\subsection{Visão Geral do Speedup}
+
+O gráfico abaixo resume o speedup de cada algoritmo para o maior tamanho de entrada:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    bar width=14pt,
+    width=0.85\textwidth,
+    height=6.5cm,
+    legend style={at={(0.5,-0.20)}, anchor=north, legend columns=-1},
+    symbolic x coords={Matriz 1400, Selection 106k, Heap 80M, Histograma 600M},
+    xtick=data,
+    x tick label style={font=\small, rotate=10, anchor=east},
+    ymin=0, ymax=5,
+    ylabel={Speedup},
+    nodes near coords,
+    nodes near coords align={vertical},
+    every node near coord/.append style={font=\tiny},
+]
+\addplot coordinates {
+    (Matriz 1400,1.99)
+    (Selection 106k,1.72)
+    (Heap 80M,1.36)
+    (Histograma 600M,1.97)
+};
+\addplot coordinates {
+    (Matriz 1400,3.92)
+    (Selection 106k,2.40)
+    (Heap 80M,1.72)
+    (Histograma 600M,3.65)
+};
+\legend{2 threads, 4 threads}
+\end{axis}
+\end{tikzpicture}
+\caption{Speedup por algoritmo para 2 e 4 threads (maior tamanho de entrada)}
+\end{figure}
+
+A diferença entre os grupos é bem clara: multiplicação matricial e histograma ficam perto do speedup ideal, enquanto os sorts ficam bem abaixo. Isso reflete diretamente a estrutura de dependências de cada algoritmo.
+
+\subsection{Speedup em Função do Tamanho}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    width=0.75\textwidth,
+    height=6cm,
+    xlabel={Tamanho (ordem $n$)},
+    ylabel={Speedup},
+    xtick={350,700,1400},
+    xticklabels={350, 700, 1400},
+    ymin=0, ymax=5,
+    legend pos=south east,
+    mark size=3pt,
+]
+\addplot[blue, mark=square*] coordinates {(350,1.97)(700,1.98)(1400,1.99)};
+\addplot[red, mark=*] coordinates {(350,3.91)(700,3.92)(1400,3.92)};
+\legend{2 threads, 4 threads}
+\end{axis}
+\end{tikzpicture}
+\caption{Speedup vs.\ tamanho --- Multiplicação Matricial}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    width=0.75\textwidth,
+    height=6cm,
+    xlabel={Tamanho},
+    ylabel={Speedup},
+    xtick={33000,66000,106000},
+    xticklabels={33k, 66k, 106k},
+    ymin=0, ymax=3,
+    legend pos=south east,
+    mark size=3pt,
+]
+\addplot[blue, mark=square*] coordinates {(33000,1.60)(66000,1.68)(106000,1.72)};
+\addplot[red, mark=*] coordinates {(33000,2.27)(66000,2.34)(106000,2.40)};
+\legend{2 threads, 4 threads}
+\end{axis}
+\end{tikzpicture}
+\caption{Speedup vs.\ tamanho --- Selection Sort}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    width=0.75\textwidth,
+    height=6cm,
+    xlabel={Tamanho (milhões)},
+    ylabel={Eficiência},
+    xtick={150000000,300000000,600000000},
+    xticklabels={150M, 300M, 600M},
+    ymin=0, ymax=1.2,
+    legend pos=south east,
+    mark size=3pt,
+]
+\addplot[blue, mark=square*] coordinates {
+    (150000000,0.955)(300000000,0.980)(600000000,0.985)};
+\addplot[red, mark=*] coordinates {
+    (150000000,0.845)(300000000,0.917)(600000000,0.912)};
+\legend{2 threads, 4 threads}
+\end{axis}
+\end{tikzpicture}
+\caption{Eficiência vs.\ tamanho --- Histograma}
+\end{figure}
+
+Em todos os casos o speedup cresce (ou pelo menos se mantém) com entradas maiores. Isso é o efeito que a Lei de Gustafson descreve: problemas maiores diluem o overhead.
+
+\subsection{Comparação Selection Sort vs Heap Sort}
+
+\subsubsection{Qual gera mais cache-misses?}
+
+O Heap Sort. O problema é o padrão de acesso nas operações de sift-down: o caminho da raiz até as folhas corresponde a índices que dobram a cada passo ($i \to 2i+1$, $2i+2$). Para heaps grandes os elementos acessados estão espalhados por toda a memória, gerando cache-misses frequentes. LaMarca e Ladner \cite{lamarca1999} mostraram empiricamente que o Heap Sort tem muito mais cache-misses que o Merge Sort ou o Quick Sort para entradas que não cabem no cache.
+
+O Selection Sort acessa o vetor de forma sequencial no laço interno (boa localidade espacial), mas a troca final pega um elemento de posição aleatória. O impacto é menor que o do Heap Sort, especialmente para entradas moderadas.
+
+\subsubsection{Qual se beneficiou mais do paralelismo?}
+
+O Selection Sort, com speedup de 2,40× contra 1,72× do Heap Sort com 4 threads. Parece contra-intuitivo já que o Heap Sort é assintoticamente mais eficiente. A explicação está na fração serial de cada um.
+
+No Selection Sort a fase paralelizável (busca do mínimo) representa uma fatia razoável do tempo total porque o algoritmo é $O(n^2)$ e essa busca custa $O(n)$ por iteração. No Heap Sort a fase de extração --- completamente serial --- domina o tempo porque é $O(n \log n)$ contra $O(n)$ da construção do heap. Sobra muito pouco pra paralelizar.
+
+\subsubsection{Balanceamento de carga}
+
+No Selection Sort paralelo, o laço interno na iteração $i$ tem $n-i-1$ elementos. Nas primeiras iterações o trabalho é grande e as threads ficam bem ocupadas. Nas últimas iterações o laço tem poucos elementos e o overhead de criar o time de threads supera o trabalho útil. É um desbalanceamento que piora gradualmente.
+
+No Heap Sort, a construção por níveis tem o problema oposto nos níveis superiores da árvore: os primeiros níveis têm poucos nós (o nível da raiz tem 1 nó), então praticamente uma thread faz todo o trabalho. Para esses casos o overhead de gerenciar 4 threads pra processar 1 ou 2 elementos é indefensável.
+
+No geral o Selection Sort tem balanceamento melhor que o Heap Sort por causa das iterações do laço interno terem custo uniforme (uma comparação cada) --- a divisão estática os divide igualmente.
+
+\subsection{Análise pela Lei de Amdahl}
+
+Usando os resultados com 4 threads para estimar a fração serial de cada algoritmo:
+\begin{equation}
+f = \frac{1/S - 1/p}{1 - 1/p} = \frac{1/S - 1/4}{3/4}
+\end{equation}
+
+\begin{table}[H]
+\centering
+\caption{Fração serial estimada via Lei de Amdahl}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Algoritmo} & \textbf{S(4)} & \textbf{Fração serial estimada} \\
+\midrule
+Multiplicação Matricial & 3,92 & 0,7\% \\
+Selection Sort & 2,40 & 22,2\% \\
+Heap Sort & 1,72 & 44,2\% \\
+Histograma & 3,65 & 3,2\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Os números batem com o que a análise qualitativa do código sugeria. A fração serial de 44,2\% do Heap Sort explica diretamente por que ele escala tão mal, mesmo tendo complexidade assintótica melhor que o Selection Sort.
+
+% =====================================================================
+\section{Limitações}
+
+Os experimentos rodaram num ambiente Windows 10 de propósito geral, com outros processos ativos em segundo plano. Isso cria variabilidade nos tempos. A mediana de 5 execuções ajuda, mas um ambiente controlado (sem outros processos, com afinidade de threads fixada) daria resultados mais limpos.
+
+Testamos no máximo 4 threads, o que representa menos da metade dos núcleos do Ryzen 5 3500X (6 núcleos). Seria interessante testar com 6 threads e verificar se a eficiência se mantém ou cai. Com mais threads o overhead de sincronização tende a crescer e pode começar a dominar, especialmente nos sorts.
+
+A implementação do Heap Sort paralelo por níveis é didática mas não é a mais eficiente. Usar \texttt{\#pragma omp task} com divisão recursiva do heap provavelmente daria speedups melhores.
+
+% =====================================================================
+\section{Considerações Finais}
+
+Esse trabalho mostrou na prática o que a teoria de paralelismo prevê: nem todo algoritmo se beneficia igualmente de mais threads. A multiplicação matricial e o histograma escalaram perto do ideal; os sorts não.
+
+O ponto central é que paralelizabilidade depende de dependências de dados. Onde as iterações são independentes (multiplicação matricial, contagem do histograma) o ganho é quase linear. Onde há uma cadeia de dependências que precisa ser respeitada (laço externo do Selection Sort, fase de extração do Heap Sort) o ganho é limitado.
+
+A comparação entre as três estratégias pro histograma (região crítica, atômico, histogramas privados) ilustra bem como a escolha da estratégia de sincronização importa tanto quanto decidir paralelizar. A versão com histogramas privados eliminou completamente a contenção durante a contagem e ficou com eficiência acima de 90\%.
+
+A comparação entre Selection Sort e Heap Sort foi talvez o resultado mais surpreendente: o algoritmo assintoticamente inferior ($O(n^2)$) se beneficiou mais do paralelismo que o superior ($O(n \log n)$) por ter uma fração serial menor na prática.
+
+Como próximos passos ficam: algoritmos de ordenação intrinsecamente paralelos (Merge Sort, Bitonic Sort), técnicas de blocking na multiplicação matricial pra melhorar o uso de cache em conjunto com o paralelismo, e uma comparação entre OpenMP e MPI pra os mesmos algoritmos.
+
+% =====================================================================
+\bibliographystyle{plain}
+\begin{thebibliography}{20}
+
+\bibitem{amdahl1967}
+AMDAHL, G. M.
+\textit{Validity of the single processor approach to achieving large scale computing capabilities}.
+In: Proceedings of the Spring Joint Computer Conference (AFIPS). New York: ACM, 1967. p. 483--485.
+
+\bibitem{gustafson1988}
+GUSTAFSON, J. L.
+\textit{Reevaluating Amdahl's law}.
+Communications of the ACM, New York, v. 31, n. 5, p. 532--533, May 1988.
+
+\bibitem{openmp52}
+OPENMP ARCHITECTURE REVIEW BOARD.
+\textit{OpenMP Application Programming Interface Specification Version 5.2}.
+[S.l.]: OpenMP ARB, 2021. Disponível em: \url{https://www.openmp.org/specifications/}.
+
+\bibitem{flynn1972}
+FLYNN, M. J.
+\textit{Some computer organizations and their effectiveness}.
+IEEE Transactions on Computers, New York, v. C-21, n. 9, p. 948--960, Sep. 1972.
+
+\bibitem{dagum1998}
+DAGUM, L.; MENON, R.
+\textit{OpenMP: an industry-standard API for shared-memory programming}.
+IEEE Computational Science and Engineering, New York, v. 5, n. 1, p. 46--55, Jan./Mar. 1998.
+
+\bibitem{chapman2007}
+CHAPMAN, B.; JOST, G.; VAN DER PAS, R.
+\textit{Using OpenMP: Portable Shared Memory Parallel Programming}.
+Cambridge: MIT Press, 2007.
+
+\bibitem{goto2008}
+GOTO, K.; VAN DE GEIJN, R. A.
+\textit{Anatomy of high-performance matrix multiplication}.
+ACM Transactions on Mathematical Software, New York, v. 34, n. 3, p. 12:1--12:25, May 2008.
+
+\bibitem{anderson1999}
+ANDERSON, E. et al.
+\textit{LAPACK Users' Guide}. 3. ed. Philadelphia: SIAM, 1999.
+
+\bibitem{strassen1969}
+STRASSEN, V.
+\textit{Gaussian elimination is not optimal}.
+Numerische Mathematik, Berlin, v. 13, p. 354--356, 1969.
+
+\bibitem{singler2007}
+SINGLER, J.; SANDERS, P.; PUTZE, F.
+\textit{MCSTL: The multi-core standard template library}.
+In: European Conference on Parallel Processing (Euro-Par 2007). Lecture Notes in Computer Science, v. 4641. Berlin: Springer, 2007. p. 682--694.
+
+\bibitem{nakashima2012}
+NAKASHIMA, H. et al.
+\textit{Performance evaluation of OpenMP and MPI on a shared-memory multiprocessor}.
+Parallel Computing, Amsterdam, v. 38, n. 1--2, p. 1--14, Jan. 2012.
+
+\bibitem{lamarca1999}
+LAMARCA, A.; LADNER, R. E.
+\textit{The influence of caches on the performance of sorting}.
+Journal of Algorithms, Amsterdam, v. 31, n. 1, p. 66--104, Apr. 1999.
+
+\bibitem{cormen2009}
+CORMEN, T. H. et al.
+\textit{Introduction to Algorithms}. 3. ed. Cambridge: MIT Press, 2009.
+
+\bibitem{pacheco2011}
+PACHECO, P.
+\textit{An Introduction to Parallel Programming}.
+Burlington: Morgan Kaufmann, 2011.
+
+\bibitem{quinn2004}
+QUINN, M. J.
+\textit{Parallel Programming in C with MPI and OpenMP}.
+New York: McGraw-Hill, 2004.
+
+\bibitem{hager2011}
+HAGER, G.; WELLEIN, G.
+\textit{Introduction to High Performance Computing for Scientists and Engineers}.
+Boca Raton: CRC Press, 2011.
+
+\end{thebibliography}
+
+\end{document}
