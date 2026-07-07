@@ -1,0 +1,1 @@
+# Paraleliza-o-de-Algoritmos
